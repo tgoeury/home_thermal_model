@@ -1,6 +1,8 @@
-"""Tests unitaires pour l'export ONNX (train.export_onnx)."""
+"""Tests unitaires pour l'export ONNX (train.export_onnx) et les loaders ORT."""
 
 from __future__ import annotations
+
+import json
 
 import numpy as np
 import pytest
@@ -63,6 +65,26 @@ def test_export_onnx_limited_creates_file(tmp_path):
     assert out.stat().st_size > 0
 
 
+def test_export_onnx_limited_embeds_metadata(tmp_path):
+    import onnxruntime as ort
+
+    model = LimitedModel(n_limited_features=N_FEATURES, n_targets=N_TARGETS, history_hours=HISTORY_HOURS)
+    checkpoint = _limited_checkpoint(model)
+    out = tmp_path / "limited.onnx"
+    export_onnx(model, checkpoint, out)
+
+    sess = ort.InferenceSession(str(out))
+    custom = sess.get_modelmeta().custom_metadata_map
+    assert "home_model_meta" in custom
+    meta = json.loads(custom["home_model_meta"])
+    assert meta["n_limited_features"] == N_FEATURES
+    assert meta["n_targets"] == N_TARGETS
+    assert meta["history_hours"] == HISTORY_HOURS
+    assert "limited_stats" in meta
+    assert "target_stats" in meta
+    assert "n_outdoor_features" not in meta
+
+
 def test_export_onnx_limited_inference(tmp_path):
     import onnxruntime as ort
 
@@ -110,6 +132,57 @@ def test_export_onnx_full_creates_file(tmp_path):
     out = tmp_path / "full.onnx"
     export_onnx(full, checkpoint, out)
     assert out.exists()
+
+
+def test_export_onnx_full_embeds_metadata(tmp_path):
+    import onnxruntime as ort
+
+    limited = LimitedModel(n_limited_features=N_FEATURES, n_targets=N_TARGETS, history_hours=HISTORY_HOURS)
+    full = FullModel(limited, n_outdoor_features=N_OUTDOOR, n_targets=N_TARGETS, history_hours=HISTORY_HOURS)
+    checkpoint = _full_checkpoint(full)
+    out = tmp_path / "full.onnx"
+    export_onnx(full, checkpoint, out)
+
+    sess = ort.InferenceSession(str(out))
+    meta = json.loads(sess.get_modelmeta().custom_metadata_map["home_model_meta"])
+    assert meta["n_outdoor_features"] == N_OUTDOOR
+    assert meta["outdoor_columns"] == [f"out_{i}" for i in range(N_OUTDOOR)]
+    assert "outdoor_stats" in meta
+
+
+def test_load_limited_onnx(tmp_path, monkeypatch):
+    """load_limited_onnx reconstruit le checkpoint depuis les métadonnées embarquées."""
+    import onnxruntime as ort
+    from evaluate import load_limited_onnx
+
+    model = LimitedModel(n_limited_features=N_FEATURES, n_targets=N_TARGETS, history_hours=HISTORY_HOURS)
+    checkpoint = _limited_checkpoint(model)
+    out = tmp_path / "limited.onnx"
+    export_onnx(model, checkpoint, out)
+
+    monkeypatch.setattr(config, "CHECKPOINT_DIR", tmp_path)
+    sess, cp = load_limited_onnx(onnx_path=out)
+    assert isinstance(sess, ort.InferenceSession)
+    assert cp["n_limited_features"] == N_FEATURES
+    assert cp["n_targets"] == N_TARGETS
+    assert cp["limited_columns"] == [f"feat_{i}" for i in range(N_FEATURES)]
+
+
+def test_load_full_onnx(tmp_path, monkeypatch):
+    """load_full_onnx reconstruit le checkpoint depuis les métadonnées embarquées."""
+    import onnxruntime as ort
+    from evaluate import load_full_onnx
+
+    limited = LimitedModel(n_limited_features=N_FEATURES, n_targets=N_TARGETS, history_hours=HISTORY_HOURS)
+    full = FullModel(limited, n_outdoor_features=N_OUTDOOR, n_targets=N_TARGETS, history_hours=HISTORY_HOURS)
+    checkpoint = _full_checkpoint(full)
+    out = tmp_path / "full.onnx"
+    export_onnx(full, checkpoint, out)
+
+    monkeypatch.setattr(config, "CHECKPOINT_DIR", tmp_path)
+    sess, cp = load_full_onnx(onnx_path=out)
+    assert isinstance(sess, ort.InferenceSession)
+    assert cp["n_outdoor_features"] == N_OUTDOOR
 
 
 def test_export_onnx_full_inference(tmp_path):

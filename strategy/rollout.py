@@ -12,8 +12,8 @@ batch.
 from __future__ import annotations
 
 import numpy as np
+import onnxruntime as ort
 import pandas as pd
-import torch
 
 import config
 from data.pipeline import _select_columns, compute_window_offsets
@@ -115,7 +115,7 @@ class PlanningContext:
         self.eval_rows = eval_rows
         self.now_timestamp = table.index[self.now_idx]
 
-    def _predict(self, model: torch.nn.Module, schedule_steps: dict[tuple[str, str], np.ndarray]) -> np.ndarray:
+    def _predict(self, sess: ort.InferenceSession, schedule_steps: dict[tuple[str, str], np.ndarray]) -> np.ndarray:
         """Prédictions dénormalisées (n_eval_rows, n_targets) pour un planning
         candidat (déjà sur-échantillonné au pas natif, via
         `strategy.schedule.schedule_to_steps`)."""
@@ -124,32 +124,31 @@ class PlanningContext:
         for key, col in self.house_state_cols.items():
             arr[self.future_start_local : end, col] = schedule_steps[key]
 
-        arr_norm = self.limited_stats.transform(arr)
+        arr_norm = self.limited_stats.transform(arr).astype(np.float32)
         batch = arr_norm[self.local_rows_matrix]
 
-        with torch.no_grad():
-            pred = model(torch.from_numpy(batch))
+        pred = sess.run(["predictions"], {"x_limited": batch})[0]
 
-        return self.target_stats.inverse_transform(pred.numpy())
+        return self.target_stats.inverse_transform(pred)
 
     def evaluate(
         self,
-        model: torch.nn.Module,
+        sess: ort.InferenceSession,
         schedule_steps: dict[tuple[str, str], np.ndarray],
         comfort_ranges: dict[str, tuple[float, float]] | None = None,
     ) -> float:
         """Coût de confort pour un planning candidat (plages par pièce si
         `comfort_ranges` est fourni, sinon plage globale `config.COMFORT_TEMP_*`)."""
-        pred_real = self._predict(model, schedule_steps)
+        pred_real = self._predict(sess, schedule_steps)
         temperatures = pred_real[:, self.temperature_target_indices]
         return comfort.comfort_cost(temperatures, self.temperature_target_rooms, comfort_ranges)
 
     def predict_temperatures(
-        self, model: torch.nn.Module, schedule_steps: dict[tuple[str, str], np.ndarray]
+        self, sess: ort.InferenceSession, schedule_steps: dict[tuple[str, str], np.ndarray]
     ) -> dict[str, np.ndarray]:
         """Températures prédites par pièce (n_eval_rows,) pour un planning
         candidat, en unités réelles."""
-        pred_real = self._predict(model, schedule_steps)
+        pred_real = self._predict(sess, schedule_steps)
         return {
             room: pred_real[:, idx]
             for room, idx in zip(self.temperature_target_rooms, self.temperature_target_indices)

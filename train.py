@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 import torch
@@ -173,6 +174,30 @@ def train_full_model(
     )
 
 
+def _checkpoint_to_json_meta(checkpoint: dict) -> dict:
+    """Sérialise les métadonnées du checkpoint (stats, colonnes, dimensions)
+    en un dict JSON-compatible. Exclut les poids du modèle (model_state)."""
+
+    def _stats(s):
+        return {"mean": s.mean.tolist(), "std": s.std.tolist()} if s is not None else None
+
+    meta: dict = {
+        "n_limited_features": checkpoint["n_limited_features"],
+        "n_targets": checkpoint["n_targets"],
+        "history_hours": checkpoint["history_hours"],
+        "horizon_steps": checkpoint["horizon_steps"],
+        "limited_columns": checkpoint["limited_columns"],
+        "target_columns": checkpoint["target_columns"],
+        "limited_stats": _stats(checkpoint["limited_stats"]),
+        "target_stats": _stats(checkpoint["target_stats"]),
+    }
+    if "n_outdoor_features" in checkpoint:
+        meta["n_outdoor_features"] = checkpoint["n_outdoor_features"]
+        meta["outdoor_columns"] = checkpoint["outdoor_columns"]
+        meta["outdoor_stats"] = _stats(checkpoint["outdoor_stats"])
+    return meta
+
+
 def export_onnx(model: torch.nn.Module, checkpoint: dict, output_path: Path) -> None:
     """Exporte un modèle PyTorch entraîné en ONNX.
 
@@ -217,3 +242,16 @@ def export_onnx(model: torch.nn.Module, checkpoint: dict, output_path: Path) -> 
             dynamic_axes=dynamic_axes,
             **export_kwargs,
         )
+
+    # Injecter les métadonnées (stats de normalisation, colonnes, dimensions)
+    # directement dans le fichier ONNX via metadata_props, lisibles depuis
+    # onnxruntime seul (sess.get_modelmeta().custom_metadata_map).
+    # Cela rend le .onnx auto-suffisant pour l'inférence sur petit hardware
+    # (RPi, etc.) sans dépendance PyTorch.
+    import onnx as onnx_lib
+
+    proto = onnx_lib.load(str(output_path))
+    entry = proto.metadata_props.add()
+    entry.key = "home_model_meta"
+    entry.value = json.dumps(_checkpoint_to_json_meta(checkpoint))
+    onnx_lib.save(proto, str(output_path))

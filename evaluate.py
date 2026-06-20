@@ -72,6 +72,76 @@ def load_full_model(
     return model, checkpoint
 
 
+# ---------------------------------------------------------------------------
+# Chargement des sessions ONNX Runtime (planification / inférence temps réel)
+# ---------------------------------------------------------------------------
+# Les métadonnées (stats de normalisation, colonnes, dimensions) sont
+# embarquées dans le fichier .onnx lui-même (metadata_props) à l'export.
+# Ces fonctions ne requièrent ni PyTorch ni le fichier .pt — uniquement
+# onnxruntime et numpy, adaptés à un déploiement sur petit hardware (RPi…).
+
+def _onnx_meta_to_checkpoint(sess) -> dict:
+    """Reconstruit un dict checkpoint-like depuis les metadata_props ONNX."""
+    import json
+    import numpy as np
+    from data.pipeline import FeatureStats
+
+    raw = sess.get_modelmeta().custom_metadata_map.get("home_model_meta")
+    if raw is None:
+        raise ValueError(
+            "Ce fichier ONNX ne contient pas de métadonnées 'home_model_meta'. "
+            "Réexportez le modèle avec la version actuelle de train.export_onnx()."
+        )
+    meta = json.loads(raw)
+
+    def _stats(d):
+        if d is None:
+            return None
+        return FeatureStats(mean=np.array(d["mean"]), std=np.array(d["std"]))
+
+    checkpoint: dict = {
+        "n_limited_features": meta["n_limited_features"],
+        "n_targets": meta["n_targets"],
+        "history_hours": meta["history_hours"],
+        "horizon_steps": meta["horizon_steps"],
+        "limited_columns": meta["limited_columns"],
+        "target_columns": meta["target_columns"],
+        "limited_stats": _stats(meta["limited_stats"]),
+        "target_stats": _stats(meta["target_stats"]),
+    }
+    if "n_outdoor_features" in meta:
+        checkpoint["n_outdoor_features"] = meta["n_outdoor_features"]
+        checkpoint["outdoor_columns"] = meta["outdoor_columns"]
+        checkpoint["outdoor_stats"] = _stats(meta["outdoor_stats"])
+    return checkpoint
+
+
+def load_limited_onnx(onnx_path: Path = config.CHECKPOINT_DIR / "limited.onnx"):
+    """Session ORT + métadonnées pour le modèle 'limited'.
+
+    Aucune dépendance PyTorch — uniquement onnxruntime + numpy.
+    Utilisé pour la planification volets/fenêtres.
+    """
+    import onnxruntime as ort
+
+    sess = ort.InferenceSession(str(onnx_path))
+    checkpoint = _onnx_meta_to_checkpoint(sess)
+    return sess, checkpoint
+
+
+def load_full_onnx(onnx_path: Path = config.CHECKPOINT_DIR / "full.onnx"):
+    """Session ORT + métadonnées pour le modèle 'full'.
+
+    Aucune dépendance PyTorch — uniquement onnxruntime + numpy.
+    Utilisé pour l'inférence temps réel (x_limited + x_outdoor).
+    """
+    import onnxruntime as ort
+
+    sess = ort.InferenceSession(str(onnx_path))
+    checkpoint = _onnx_meta_to_checkpoint(sess)
+    return sess, checkpoint
+
+
 def prepare_eval_dataset(checkpoint: dict) -> tuple[HouseDataset, Subset, Subset]:
     """Reconstruit le dataset avec exactement la même normalisation
     `limited`/`target` que celle utilisée à l'entraînement."""

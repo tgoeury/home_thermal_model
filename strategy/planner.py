@@ -24,7 +24,7 @@ def plan(
 ) -> dict:
     """`comfort_ranges` : `{ pièce: (t_min, t_max) }` — plage de confort par
     pièce. Les pièces absentes retombent sur `config.COMFORT_TEMP_MIN/MAX`."""
-    model, checkpoint = evaluate.load_limited_model()
+    sess, checkpoint = evaluate.load_limited_onnx()
 
     table = build_feature_table()
     ctx = PlanningContext(table, checkpoint, horizon_hours=horizon_hours, eval_step_minutes=eval_step_minutes)
@@ -38,7 +38,7 @@ def plan(
     for _ in range(n_candidates):
         candidate = random_schedule(rooms, state_types, horizon_hours, block_hours, rng)
         steps = schedule_to_steps(candidate, ctx.horizon_steps_count, block_hours)
-        cost = ctx.evaluate(model, steps, comfort_ranges)
+        cost = ctx.evaluate(sess, steps, comfort_ranges)
         if cost < best_cost:
             best_cost = cost
             best_schedule = candidate
@@ -52,7 +52,7 @@ def plan(
         best_schedule = {key: values[:effective_n_blocks] for key, values in best_schedule.items()}
 
     best_steps = schedule_to_steps(best_schedule, ctx.horizon_steps_count, block_hours)
-    temperatures_by_room = ctx.predict_temperatures(model, best_steps)
+    temperatures_by_room = ctx.predict_temperatures(sess, best_steps)
     reasons = comfort.block_reasons(
         temperatures_by_room, ctx.eval_rows, ctx.now_idx, effective_n_blocks, block_hours,
         comfort_ranges=comfort_ranges,
